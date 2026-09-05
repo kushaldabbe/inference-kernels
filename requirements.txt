@@ -1,0 +1,4 @@
+torch==2.14.0+cu126; platform_system == "Windows"
+triton-windows; platform_system == "Windows"
+pytest
+numpy
