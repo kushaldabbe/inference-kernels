@@ -25,7 +25,7 @@ never publishes a number the hardware cannot back.
 
 | Kernel | Status | Correctness | Best result | % of 4090 peak |
 |---|---|---|---|---|
-| rmsnorm | v1 done | green vs HF LlamaRMSNorm | pending 4090 run | pending |
+| rmsnorm | v1 done | 25/25 vs HF LlamaRMSNorm | 165 GB/s local smoke (1650 Ti, context only) | pending 4090 run |
 
 ## Run
 

@@ -52,7 +52,9 @@ def local_hardware() -> Hardware | None:
     if not torch.cuda.is_available():
         return None
     p = torch.cuda.get_device_properties(0)
-    est_bw = p.memory_clock_rate * 1e3 * p.memory_bus_width / 8 / 1e9
+    # torch reports the DDR clock; data rate = 2x clock (known gotcha).
+    # Example: GTX 1650 Ti reports 6001 MHz x 128-bit -> 2*6001*128/8 = 192 GB/s.
+    est_bw = p.memory_clock_rate * 1e3 * 2 * p.memory_bus_width / 8 / 1e9
     return Hardware(
         name=f"{p.name} (local, estimated)",
         bandwidth_GBps=est_bw,
