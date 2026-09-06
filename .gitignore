@@ -6,3 +6,5 @@ __pycache__/
 # local-only working docs, not part of the shipped repo
 BLOG.md
 project-build-spec.md
+.venv4090/
+results/
