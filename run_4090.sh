@@ -5,11 +5,16 @@
 #   RunPod "runpod/pytorch" template: torch 2.8.0+cu128 preinstalled,
 #   driver 570-580, CUDA 13.0, Python 3.12.
 #
-# What it does:
-#   1. preflight: correct GPU? driver visible? torch+triton import?
-#   2. d2d copy sanity: is this box's bandwidth actually ~4090-class?
-#   3. pytest correctness suite (must pass before any timing)
-#   4. bench, everything logged into results/<timestamp>/
+# Stages: preflight -> d2d sanity -> pytest gate -> bench.
+# Every run leaves a self-contained forensics folder in results/<ts>/:
+#   console.log     everything (stdout+stderr)
+#   env.json        gpu, versions, git sha + dirty state, copy bandwidth
+#   nvidia_smi.txt  full nvidia-smi
+#   clocks.txt      clock/power/temperature snapshot (throttle evidence)
+#   git_state.txt   exact code state (sha, dirty files, diffstat)
+#   rmsnorm.json    machine-readable bench rows
+# Any failure prints: FAILED: stage=<name> exit=<code> — the console.log
+# tail then shows the last lines of that stage.
 #
 # Usage:
 #   bash run_4090.sh
@@ -25,11 +30,30 @@ OUT="results/$(date +%Y%m%d_%H%M%S)"
 mkdir -p "$OUT"
 exec > >(tee "$OUT/console.log") 2>&1
 
-echo "=== 1/4 preflight ==="
+STAGE="0_setup"
+trap 'rc=$?; if [ "$rc" -ne 0 ]; then echo; echo "FAILED: stage=$STAGE exit=$rc at $(date -u +%Y-%m-%dT%H:%M:%SZ)"; echo "see $OUT/console.log tail for the last lines of this stage"; fi' EXIT
+
+ts() { date -u +%Y-%m-%dT%H:%M:%SZ; }
+
+echo "=== run started $(ts) ==="
+echo "artifacts: $OUT/"
+
+STAGE="1_preflight"
+echo "=== [$(ts)] 1/4 preflight ==="
 GPU_LINE=$(nvidia-smi --query-gpu=name,memory.total,driver_version --format=csv,noheader | head -n1)
 GPU_NAME="${GPU_LINE%%,*}"
 echo "gpu line: $GPU_LINE"
 nvidia-smi | tee "$OUT/nvidia_smi.txt" >/dev/null
+nvidia-smi -q -d CLOCK,POWER,TEMPERATURE > "$OUT/clocks.txt" 2>&1 || true
+
+{
+  echo "sha: $(git rev-parse HEAD 2>/dev/null || echo unknown)"
+  echo "dirty files (git status --porcelain):"
+  git status --porcelain 2>/dev/null || true
+  echo "diffstat:"
+  git diff --stat 2>/dev/null || true
+} > "$OUT/git_state.txt"
+echo "git state: $(head -n1 "$OUT/git_state.txt")"
 
 case "$GPU_NAME" in
   *"RTX 4090"*) echo "GPU check: OK (RTX 4090)" ;;
@@ -57,9 +81,11 @@ else
 fi
 PY="$VENV/bin/python"
 
-echo "=== 2/4 d2d copy sanity ==="
-$PY - <<'EOF'
-import json, os, subprocess, sys
+STAGE="2_d2d_sanity"
+echo "=== [$(ts)] 2/4 d2d copy sanity ==="
+IKP_OUT="$OUT" $PY - <<'EOF'
+import json
+import os
 
 import torch
 
@@ -89,14 +115,9 @@ mini = float(os.environ.get("IKP_MIN_COPY_GBPS", "700"))
 print(f"d2d copy: {gbps:.0f} GB/s  (RTX 4090 theoretical: 1008 GB/s)")
 if gbps < mini:
     print(f"abort: copy bandwidth {gbps:.0f} < {mini:.0f} GB/s — box is throttled/shared")
-    sys.exit(1)
+    raise SystemExit(1)
 if gbps < warn:
-    print(f"warn: copy bandwidth {gbps:.0f} < {warn:.0f} GB/s — check clocks before trusting numbers")
-
-try:
-    sha = subprocess.check_output(["git", "rev-parse", "HEAD"], text=True).strip()
-except Exception:
-    sha = "unknown"
+    print(f"warn: copy bandwidth {gbps:.0f} < {warn:.0f} GB/s — check clocks.txt for throttling")
 
 env = {
     "gpu_name": name,
@@ -105,24 +126,30 @@ env = {
     "torch": torch.__version__,
     "cuda_build": torch.version.cuda,
     "triton": triton.__version__,
-    "git_sha": sha,
     "d2d_copy_GBps": round(gbps, 1),
 }
-with open("results_env.json", "w") as f:
-    json.dump(env, f, indent=2)
+out = os.environ.get("IKP_OUT")
+if out:
+    with open(os.path.join(out, "env.json"), "w") as f:
+        json.dump(env, f, indent=2)
 print(json.dumps(env, indent=2))
 EOF
-mv results_env.json "$OUT/env.json"
 
-echo "=== 3/4 pytest (correctness gate) ==="
+STAGE="3_pytest"
+echo "=== [$(ts)] 3/4 pytest (correctness gate) ==="
 $PY -m pytest tests -q
 
-echo "=== 4/4 bench ==="
-$PY -m bench.bench_rmsnorm
+STAGE="4_bench"
+echo "=== [$(ts)] 4/4 bench ==="
+$PY -m bench.bench_rmsnorm --out "$OUT/rmsnorm.json"
 
+STAGE="done"
 echo
-echo "=== DONE ==="
+echo "=== DONE $(ts) ==="
 echo "artifacts in $OUT/:"
-echo "  console.log    full output"
-echo "  env.json       gpu, versions, git sha, copy bandwidth"
+echo "  console.log    full output of all stages"
+echo "  env.json       gpu, versions, copy bandwidth"
 echo "  nvidia_smi.txt full nvidia-smi"
+echo "  clocks.txt     clock/power/temperature (throttle evidence)"
+echo "  git_state.txt  sha + dirty files + diffstat"
+echo "  rmsnorm.json   machine-readable bench rows"
